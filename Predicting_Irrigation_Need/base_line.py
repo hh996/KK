@@ -131,8 +131,9 @@ def run_cv(
                 learning_rate=0.05,
                 depth=8,
                 l2_leaf_reg=3.0,
-                colsample_bylevel=0.8,
                 auto_class_weights="Balanced",
+                task_type="GPU",
+                devices="0",
                 od_type="Iter",
                 od_wait=200,
                 verbose=False,
@@ -207,8 +208,9 @@ def train_and_predict(
             learning_rate=0.05,
             depth=8,
             l2_leaf_reg=3.0,
-            colsample_bylevel=0.8,
             auto_class_weights="Balanced",
+            task_type="GPU",
+            devices="0",
             verbose=200,
         )
         model.fit(train_pool)
@@ -244,7 +246,7 @@ def main() -> None:
     parser.add_argument("--data_dir", type=str, default="Predicting_Irrigation_Need/data", help="数据目录，包含 train.csv/test.csv/sample_submission.csv")
     parser.add_argument("--n_splits", type=int, default=5, help="StratifiedKFold 折数")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--save_path", type=str, default="Predicting_Irrigation_Need/submission.csv", help="提交文件保存路径")
+    parser.add_argument("--save_path", type=str, default="Predicting_Irrigation_Need/baseline_catboost.csv", help="提交文件保存路径")
     parser.add_argument("--verbose_report", action="store_true", help="打印每折 classification_report（较长）")
     parser.add_argument(
         "--backend",
