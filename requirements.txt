@@ -15,3 +15,6 @@ ydata-profiling>=4.6
 # 运行 Jupyter 笔记本（可选）
 jupyter>=1.0
 ipykernel>=6.0
+
+# Orbit Wars 智能体运行
+kaggle-environments
