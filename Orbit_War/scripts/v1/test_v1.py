@@ -1,6 +1,5 @@
-# test_v2.py - 对比测试 baseline 和 agent_v2
+# v1 测试
 from kaggle_environments import make
-import sys
 
 def test_match(agent1, agent2, num_games=5):
     """运行多局对战，统计胜率"""
@@ -42,13 +41,8 @@ def test_match(agent1, agent2, num_games=5):
     return wins
 
 if __name__ == "__main__":
-    # 测试 agent_v2 vs baseline
-    print("=" * 50)
-    print("Testing: agent_v2.py vs main.py (baseline)")
-    print("=" * 50)
-    test_match("agent_v2.py", "main.py", num_games=10)
-
+    # v1 测试, 测试 main.py vs random
     print("\n" + "=" * 50)
-    print("Testing: agent_v2.py vs random")
+    print("Testing: main.py vs random")
     print("=" * 50)
-    test_match("agent_v2.py", "random", num_games=5)
+    test_match("Orbit_War/data/main.py", "random", num_games=5)
