@@ -1,30 +1,14 @@
-"""
-Orbit Wars - 改进版启发式智能体 v1.1
-
-优化点：
-1. 动态防守阈值 - 前期激进，后期保守
-2. 真正的多源合击 - 协调多个行星同时攻击
-3. 敌方威胁检测 - 检测来袭舰队，提前回防
-4. 修复速度公式 - 使用正确的舰队速度计算
-5. 产能优先 - 前期优先抢占高产能行星
-"""
-
 import math
-from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet, ROTATION_RADIUS_LIMIT
-
+from kaggle_environments.envs.orbit_wars.orbit_wars import Planet, Fleet
 
 def agent(obs):
     moves = []
 
-    # 解析观测数据
     player = obs.get("player", 0) if isinstance(obs, dict) else obs.player
     raw_planets = obs.get("planets", []) if isinstance(obs, dict) else obs.planets
     raw_fleets = obs.get("fleets", []) if isinstance(obs, dict) else obs.fleets
     angular_velocity = obs.get("angular_velocity", 0.03) if isinstance(obs, dict) else obs.angular_velocity
-    initial_planets = obs.get("initial_planets", []) if isinstance(obs, dict) else obs.initial_planets
-    comets = obs.get("comets", []) if isinstance(obs, dict) else obs.comets
     comet_planet_ids = set(obs.get("comet_planet_ids", [])) if isinstance(obs, dict) else set(obs.comet_planet_ids)
-    step = obs.get("step", 0) if isinstance(obs, dict) else getattr(obs, "step", 0)
 
     planets = [Planet(*p) for p in raw_planets]
     fleets = [Fleet(*f) for f in raw_fleets]
@@ -37,177 +21,229 @@ def agent(obs):
     if not my_planets:
         return moves
 
-    # 游戏进度 (0-500回合)
-    game_progress = step / 500.0
-
-    # 构建初始位置映射
-    initial_pos = {p[0]: (p[2], p[3]) for p in initial_planets} if initial_planets else {}
-
-    # 构建彗星轨迹映射
-    comet_paths = {}
-    for comet_group in comets:
-        for pid, path in zip(comet_group.get("planet_ids", []), comet_group.get("paths", [])):
-            comet_paths[pid] = path
-
-    # 计算舰队速度 (修复公式)
+    # ---------- 核心工具 ----------
     def fleet_speed(ship_count):
-        return 1.0 + 5.0 * (math.log(max(1, ship_count)) / math.log(1000)) ** 1.5
+        """与官方源码严格一致的速度计算"""
+        if ship_count <= 1:
+            return 1.0
+        max_speed = 6.0
+        return 1.0 + (max_speed - 1.0) * (math.log(ship_count) / math.log(1000)) ** 1.5
 
-    # 预测位置函数
-    def predict_position(planet, time_steps):
-        if planet.id in comet_planet_ids and planet.id in comet_paths:
-            path = comet_paths[planet.id]
-            future_index = int(time_steps)
-            if future_index < len(path):
-                return path[future_index]
-            return path[-1] if path else (planet.x, planet.y)
+    def is_orbiting(planet):
+        """判断行星是否绕日运动（使用半径精确判定）"""
+        dist = math.hypot(planet.x - 50, planet.y - 50)
+        return dist + planet.radius < 50
 
-        if planet.id in initial_pos:
-            init_x, init_y = initial_pos[planet.id]
-            center_x, center_y = 50, 50
-            orbital_radius = math.hypot(init_x - center_x, init_y - center_y)
-            if orbital_radius + planet.radius < ROTATION_RADIUS_LIMIT:
-                init_angle = math.atan2(init_y - center_y, init_x - center_x)
-                future_angle = init_angle + angular_velocity * time_steps
-                return (center_x + orbital_radius * math.cos(future_angle),
-                        center_y + orbital_radius * math.sin(future_angle))
-        return planet.x, planet.y
+    def planet_position_at(planet, t):
+        """预测 t 回合后的行星位置（仅轨道行星）"""
+        if not is_orbiting(planet):
+            return (planet.x, planet.y)
+        dist = math.hypot(planet.x - 50, planet.y - 50)
+        angle = math.atan2(planet.y - 50, planet.x - 50)
+        future_angle = angle + angular_velocity * t
+        return (50 + dist * math.cos(future_angle),
+                50 + dist * math.sin(future_angle))
 
-    # 检测敌方舰队威胁 - 返回受威胁的行星ID和威胁等级
-    def detect_threats():
-        threats = {}  # planet_id -> total_enemy_ships_coming
-        for my_p in my_planets:
-            threats[my_p.id] = 0
-            for ef in enemy_fleets:
-                # 计算敌方舰队是否朝我方行星移动
-                dist_to_planet = math.hypot(ef.x - my_p.x, ef.y - my_p.y)
-                if dist_to_planet < 15:  # 近距离威胁
-                    # 估算到达时间
-                    ef_speed = fleet_speed(ef.ships)
-                    time_to_arrival = dist_to_planet / max(0.5, ef_speed)
-                    if time_to_arrival < 10:  # 10回合内到达
-                        threats[my_p.id] += ef.ships
-        return threats
+    def path_hits_sun(x1, y1, x2, y2, sx=50, sy=50, sr=10):
+        dx, dy = x2 - x1, y2 - y1
+        if dx == 0 and dy == 0:
+            return False
+        t = max(0, min(1, ((sx - x1)*dx + (sy - y1)*dy)/(dx*dx + dy*dy)))
+        px, py = x1 + t*dx, y1 + t*dy
+        return math.hypot(px - sx, py - sy) < sr + 2
 
-    threats = detect_threats()
+    def intercept_calc(from_x, from_y, target_planet, ship_count):
+        """
+        迭代计算：
+        - 发射角度（弧度）
+        - 精确到达时间
+        - 拦截点坐标
+        """
+        speed = fleet_speed(ship_count)
+        cur_tx, cur_ty = target_planet.x, target_planet.y
+        dist = math.hypot(cur_tx - from_x, cur_ty - from_y)
+        T = dist / speed if speed > 0 else 999
+        for _ in range(10):  # 10次迭代足够高精度
+            fx, fy = planet_position_at(target_planet, T)
+            dist = math.hypot(fx - from_x, fy - from_y)
+            T = dist / speed if speed > 0 else 999
+        angle = math.atan2(fy - from_y, fx - from_x)
+        return angle, T, (fx, fy)
 
-    # 动态防守阈值 - 前期激进(保留5%), 后期保守(保留30%)
-    def get_reserve_ratio():
-        # 根据游戏进度调整: 前期0.05, 后期0.3
-        return 0.05 + game_progress * 0.25
+    # ---------- 敌方 incoming 收集 ----------
+    incoming = {p.id: [] for p in planets}
+    for ef in enemy_fleets:
+        speed = fleet_speed(ef.ships)
+        for p in planets:
+            angle_to_planet = math.atan2(p.y - ef.y, p.x - ef.x)
+            diff = abs(angle_to_planet - ef.angle)
+            diff = min(diff, 2*math.pi - diff)
+            if diff < 0.3:
+                dist = math.hypot(ef.x - p.x, ef.y - p.y)
+                t = dist / max(0.5, speed)
+                incoming[p.id].append((ef.owner, ef.ships, t))
 
-    reserve_ratio = get_reserve_ratio()
+    # 预判敌人即将发动的进攻（用独立字典，不修改 Planet 元组）
+    enemy_available = {}
+    for ep in enemy_planets:
+        avail = max(0, ep.ships - max(10, int(ep.ships * 0.2)))
+        enemy_available[ep.id] = avail
 
-    # 计算可用兵力（考虑威胁）
-    available = {}
-    for p in my_planets:
-        base_reserve = max(5, int(p.ships * reserve_ratio))
-        # 如果有威胁，额外保留兵力
-        threat_ships = threats.get(p.id, 0)
-        reserve = max(base_reserve, threat_ships + 5)
-        available_ships = max(0, p.ships - reserve)
-        if available_ships > 0:
-            available[p.id] = {
-                'planet': p,
-                'ships': available_ships,
-                'reserve': reserve,
-                'threat': threat_ships
-            }
-
-    # 目标评分 - 考虑游戏阶段
-    def evaluate_target(target):
-        min_dist = float('inf')
-        closest_planet = None
-        for my_p in my_planets:
-            dist = math.hypot(my_p.x - target.x, my_p.y - target.y)
-            if dist < min_dist:
-                min_dist = dist
-                closest_planet = my_p
-
-        production_value = target.production ** 1.5
-        distance_penalty = max(1, min_dist)
-        defense_difficulty = max(1, target.ships)
-
-        score = production_value / (distance_penalty * defense_difficulty)
-
-        # 前期(0-30%)优先产能，后期(70-100%)优先距离
-        if game_progress < 0.3:
-            if target.production >= 4:
-                score *= 2.0  # 前期高产能行星权重更高
-            elif target.production >= 3:
-                score *= 1.5
-        elif game_progress > 0.7:
-            if min_dist < 15:
-                score *= 1.5  # 后期优先近的目标
-
-        # 中立行星优先于敌方（容易占领）
-        if target.owner == -1:
-            score *= 1.2
-
-        return score, min_dist, closest_planet
-
-    # 评估所有目标
-    targets = enemy_planets + neutral_planets
-    if not targets:
-        return moves
-
-    target_info = []
-    for t in targets:
-        score, dist, closest = evaluate_target(t)
-        target_info.append((t, score, dist, closest))
-
-    # 按价值排序
-    target_info.sort(key=lambda x: x[1], reverse=True)
-
-    # 真正的多源合击 - 为高价值目标协调多个攻击者
-    # 策略: 选择前N个高价值目标，为每个目标分配攻击者
-    top_targets = target_info[:min(3, len(target_info))]
-
-    for target, score, dist_to_closest, closest_planet in top_targets:
-        if score <= 0:
+    for ep_id, avail in enemy_available.items():
+        if avail <= 0:
             continue
+        ep = next(p for p in enemy_planets if p.id == ep_id)
+        target_my = min(my_planets, key=lambda p: math.hypot(p.x - ep.x, p.y - ep.y))
+        if target_my:
+            dist = math.hypot(ep.x - target_my.x, ep.y - target_my.y)
+            speed = fleet_speed(avail)
+            eta = dist / max(0.5, speed)
+            incoming[target_my.id].append((ep.owner, avail, eta))
 
-        ships_needed = target.ships + 1
-        ships_assigned = 0
-
-        # 收集所有可以攻击这个目标的我方行星
-        attackers = []
-        for pid, info in available.items():
-            if info['ships'] <= 0:
+    # 我方已派出的舰队（按目标行星统计，通过角度反推）
+    my_incoming = {}
+    for f in fleets:
+        if f.owner == player:
+            from_planet = next((p for p in planets if p.id == f.from_planet_id), None)
+            if from_planet is None:
                 continue
-            my_p = info['planet']
-            # 预测攻击距离
-            init_dist = math.hypot(my_p.x - target.x, my_p.y - target.y)
-            est_time = init_dist / fleet_speed(20)  # 估算时间
-            future_tx, future_ty = predict_position(target, est_time)
-            actual_dist = math.hypot(my_p.x - future_tx, my_p.y - future_ty)
-            attackers.append((pid, actual_dist, info, future_tx, future_ty))
+            best_target = None
+            best_dist = float("inf")
+            for t in planets:
+                if t.id == from_planet.id:
+                    continue
+                angle_to_t = math.atan2(t.y - from_planet.y, t.x - from_planet.x)
+                diff = abs(angle_to_t - f.angle)
+                diff = min(diff, 2*math.pi - diff)
+                if diff < 0.3:
+                    dist = math.hypot(from_planet.x - t.x, from_planet.y - t.y)
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_target = t
+            if best_target:
+                my_incoming[best_target.id] = my_incoming.get(best_target.id, 0) + f.ships
 
-        # 按距离排序
-        attackers.sort(key=lambda x: x[1])
+    # 防守模拟（精准预测是否守得住）
+    def simulate_hold(planet, incoming_events, T=30):
+        owner = planet.owner
+        ships = planet.ships
+        events = sorted(incoming_events, key=lambda x: x[2])
+        idx = 0
+        for t in range(T):
+            if owner != -1:
+                ships += planet.production
+            arrivals = []
+            while idx < len(events) and events[idx][2] <= t:
+                arrivals.append(events[idx])
+                idx += 1
+            if arrivals:
+                forces = {owner: ships}
+                for o, s, _ in arrivals:
+                    forces[o] = forces.get(o, 0) + s
+                sorted_forces = sorted(forces.items(), key=lambda x: x[1], reverse=True)
+                if len(sorted_forces) > 1:
+                    o1, s1 = sorted_forces[0]
+                    o2, s2 = sorted_forces[1]
+                    if s1 > s2:
+                        owner, ships = o1, s1 - s2
+                    elif s2 > s1:
+                        owner, ships = o2, s2 - s1
+                    else:
+                        owner, ships = -1, 0
+                else:
+                    owner, ships = sorted_forces[0]
+        return owner == player
 
-        # 分配攻击者，直到满足所需兵力
-        for pid, dist, info, future_tx, future_ty in attackers:
-            if ships_assigned >= ships_needed:
+    used = set()
+
+    # ---------- 1️⃣ 彗星撤离（使用拦截计算打移动目标） ----------
+    for p in my_planets:
+        if p.id in comet_planet_ids and p.ships > 10:
+            best = None
+            best_dist = 1e9
+            for q in my_planets:
+                if q.id != p.id and q.id not in comet_planet_ids:
+                    d = math.hypot(p.x - q.x, p.y - q.y)
+                    if d < best_dist:
+                        best_dist = d
+                        best = q
+            if best:
+                # 精确拦截
+                angle, _, (hit_x, hit_y) = intercept_calc(p.x, p.y, best, int(p.ships * 0.8))
+                if not path_hits_sun(p.x, p.y, hit_x, hit_y):
+                    moves.append([p.id, angle, int(p.ships * 0.8)])
+                    used.add(p.id)
+
+    # ---------- 2️⃣ 撤退（精确拦截己方行星） ----------
+    for p in my_planets:
+        if p.id in used:
+            continue
+        if not simulate_hold(p, incoming[p.id]):
+            best = None
+            best_dist = 1e9
+            for q in my_planets:
+                if q.id != p.id:
+                    d = math.hypot(p.x - q.x, p.y - q.y)
+                    if d < best_dist:
+                        best_dist = d
+                        best = q
+            if best:
+                send_amount = int(p.ships * 0.8)
+                angle, _, (hit_x, hit_y) = intercept_calc(p.x, p.y, best, send_amount)
+                if not path_hits_sun(p.x, p.y, hit_x, hit_y):
+                    moves.append([p.id, angle, send_amount])
+                    used.add(p.id)
+
+    # ---------- 3️⃣ 扩张（精确拦截 + 智能需求） ----------
+    targets = neutral_planets + enemy_planets
+
+    def score_target(t):
+        my_dist = min(math.hypot(p.x - t.x, p.y - t.y) for p in my_planets)
+        enemy_dist = 100
+        if enemy_planets:
+            enemy_dist = min(math.hypot(p.x - t.x, p.y - t.y) for p in enemy_planets)
+        safety = enemy_dist - my_dist
+        return t.production * 5 + safety - t.ships
+
+    targets.sort(key=score_target, reverse=True)
+
+    for t in targets[:5]:
+        # 选最近的源，用于预估到达时间
+        nearest_src = min(my_planets, key=lambda p: math.hypot(p.x - t.x, p.y - t.y))
+        _, eta_typical, _ = intercept_calc(nearest_src.x, nearest_src.y, t, 30)
+
+        # 预估到达时敌军驻军
+        if t in enemy_planets:
+            base = t.ships
+            prod = t.production * eta_typical
+            support = sum(s for o, s, time in incoming.get(t.id, []) if o == t.owner and time <= eta_typical)
+            need = max(1, base + prod + support + 1)
+        else:
+            need = t.ships + 1
+
+        already_sent = my_incoming.get(t.id, 0)
+        need = max(1, need - already_sent)
+
+        sources = sorted(my_planets, key=lambda p: math.hypot(p.x - t.x, p.y - t.y))
+        total = 0
+        for s in sources:
+            if s.id in used:
+                continue
+            available = int(s.ships * 0.6)
+            if available <= 3:
+                continue
+            send = min(available, need - total)
+            if send < 3:
+                continue
+
+            angle, _, (hit_x, hit_y) = intercept_calc(s.x, s.y, t, send)
+            if path_hits_sun(s.x, s.y, hit_x, hit_y):
+                continue
+
+            moves.append([s.id, angle, send])
+            used.add(s.id)
+            total += send
+            if total >= need:
                 break
-
-            remaining = ships_needed - ships_assigned
-            # 根据距离决定是否参与：近的派全部，远的派部分
-            if dist < 20:
-                to_send = min(info['ships'], remaining)
-            else:
-                to_send = min(info['ships'] // 2, remaining)
-
-            if to_send >= 3:
-                my_p = info['planet']
-
-                # 计算精确的发射角度（瞄准预测位置）
-                travel_time = dist / fleet_speed(to_send)
-                target_x, target_y = predict_position(target, travel_time)
-                angle = math.atan2(target_y - my_p.y, target_x - my_p.x)
-
-                moves.append([my_p.id, angle, int(to_send)])
-                info['ships'] -= to_send
-                ships_assigned += to_send
 
     return moves

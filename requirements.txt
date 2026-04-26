@@ -18,3 +18,6 @@ ipykernel>=6.0
 
 # Orbit Wars 智能体运行
 kaggle-environments
+
+stable-baselines3
+gym
