@@ -95,6 +95,8 @@ NEUTRAL_ACCEPT_RATIO = 1.0      # 中立星强制 100%
 THIRD_PARTY_SENSE_ETA = 4       # 其他玩家舰队在4回合内到达则触发感知
 THIRD_PARTY_BONUS = 1.25        # 价值乘数
 
+DISTANCE_WEIGHT = 2.0
+
 
 # ============================================================
 # Data classes
@@ -886,7 +888,11 @@ def top_targets_for_player(src, world, player, top_k):
 
         infl = world.influence_by_id.get(tid, 0.0)
         cost = max(1, int(tgt.ships) + 1)
-        val = tgt.production / (cost * 0.4 + eta + 5.0)
+        distance_weight = 2.0  # 新参数，可放在常量区
+        val = tgt.production / (cost * 0.4 + distance_weight * eta + 5.0)
+        # 额外距离衰减（与 make_atom 保持一致）
+        distance_factor = 1.0 / (1.0 + eta / DISTANCE_DISCOUNT_SCALE)
+        val *= distance_factor
 
         if tgt.owner == -1:
             val *= 1.2
