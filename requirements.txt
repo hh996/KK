@@ -19,5 +19,8 @@ ipykernel>=6.0
 # Orbit Wars 智能体运行
 kaggle-environments
 
+# Orbit_War/scripts/v3_NN NN+MCTS（含 smoke_checks / train）
+torch>=2.0.0
+
 stable-baselines3
 gym
