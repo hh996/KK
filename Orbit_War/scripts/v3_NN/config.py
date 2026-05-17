@@ -95,4 +95,4 @@ INTERRUPT_CHECKPOINT = "interrupt"
 # =============================================================================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 # 并行生成对局的工作进程数；设为 1 可回退串行（调试用）
-NUM_WORKERS = 8
+NUM_WORKERS = 1
