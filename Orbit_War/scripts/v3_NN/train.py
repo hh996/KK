@@ -1,11 +1,18 @@
 import os
 import signal
 import random
+import warnings
 from collections import deque
 
 import numpy as np
 import torch
 from kaggle_environments import make
+
+# 压掉 PyTorch 已知误报：scheduler 在 optimizer 之后调用但内部计数判断有误
+warnings.filterwarnings(
+    "ignore",
+    message="Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`",
+)
 
 from value_util import env_terminal_value
 from config import *
@@ -152,9 +159,14 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
 
     # 决定哪些槽位是"hero"（用 net 训练）
     if opponent is None:
-        hero_slots = set(range(n_agents))   # 所有玩家都是 hero
+        hero_slots = set(range(n_agents))       # 纯自博弈：所有玩家都是 hero
     else:
-        hero_slots = {random.randrange(n_agents)}   # 随机一个槽位是 hero
+        # 有对手时：2P 选 1 个 hero，4P 选 2 个 hero（对角槽位，位置对称）
+        if n_agents == 2:
+            hero_slots = {random.randrange(2)}
+        else:
+            start = random.randrange(2)         # 0 或 1
+            hero_slots = {start, start + 2}     # 对角线两个槽位：(0,2) 或 (1,3)
 
     def make_net_agent(player_id, train_net, collect_data):
         """collect_data=True 时把 MCTS priors 写入 game_history。"""
@@ -311,7 +323,7 @@ class Trainer:
         )
         self.replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
         self.iteration = 0
-        self.scaler = torch.cuda.amp.GradScaler(enabled=(DEVICE == "cuda"))
+        self.scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE == "cuda"))
 
     def _load_random_opponent_net(self):
         """从已保存的 iter_*.pt 里随机加载一个旧版本作为对手网络。"""
@@ -390,7 +402,7 @@ class Trainer:
         self.optimizer.zero_grad()
 
         # 自动混合精度上下文
-        with torch.cuda.amp.autocast(enabled=(DEVICE == "cuda")):
+        with torch.amp.autocast("cuda", enabled=(DEVICE == "cuda")):
             src_logits, tgt_logits, ship_logits, pred_v = self.net(states)
             value_loss = torch.nn.functional.mse_loss(pred_v, values)
             src_log_probs = torch.log_softmax(src_logits, dim=1)
