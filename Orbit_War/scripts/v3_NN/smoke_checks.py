@@ -1,6 +1,6 @@
 import torch
 
-from config import CHANNELS, BOARD_SIZE
+from config import CHANNELS, BOARD_SIZE, DEVICE
 from network import PolicyValueNetwork
 from mcts import MCTS
 from physics import Planet, Fleet, WorldState
@@ -64,17 +64,17 @@ def _build_comet_world():
 
 
 def run_smoke_checks():
-    net = PolicyValueNetwork(CHANNELS, BOARD_SIZE)
+    net = PolicyValueNetwork(CHANNELS, BOARD_SIZE).to(DEVICE)
     net.eval()
     mcts = MCTS(net, num_simulations=5)
 
-    # 1) MCTS 无合法动作应返回空
+    # 1) 终局时 MCTS 应返回空（不再搜索）
     w = _build_simple_world()
     for p in w.planet_list:
-        if p.owner == 0:
-            p.ships = 1
-    legal = w.get_legal_actions(0)
-    best, probs = mcts.run(w, legal)
+        p.owner = 0
+    for f in w.fleets:
+        f.owner = 0
+    best, probs = mcts.run(w, w.get_legal_actions(0))
     assert best is None
     assert probs.size == 0
 
