@@ -143,9 +143,11 @@ class MCTS:
         返回展平的 ``src_logits``、``tgt_logits``、``ships_logits``（numpy）及标量 ``value``。
         兼容旧三返回值网络（无 ship 头时补零）。
         """
-        state_t = encode_state(state, perspective_player=perspective_player).unsqueeze(
-            0
-        )
+        state_t = encode_state(
+            state,
+            perspective_player=perspective_player,
+            device=next(self.network.parameters()).device,
+        ).unsqueeze(0)
         with torch.no_grad():
             out = self.network(state_t)
             if len(out) == 4:

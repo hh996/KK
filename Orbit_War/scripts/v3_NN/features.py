@@ -12,9 +12,11 @@ for _y in range(BOARD_SIZE):
             _sun_mask[_y, _x] = 1.0
 
 
-def encode_state(world: WorldState, perspective_player=None) -> torch.Tensor:
+def encode_state(world: WorldState, perspective_player=None, device=None) -> torch.Tensor:
     if perspective_player is None:
         perspective_player = world.my_id
+    if device is None:
+        device = DEVICE
     H, W = BOARD_SIZE, BOARD_SIZE
     grid = np.zeros((CHANNELS, H, W), dtype=np.float32)   # CHANNELS 变为 17
     step_norm = min(1.0, world.step_count / 500.0)
@@ -72,4 +74,4 @@ def encode_state(world: WorldState, perspective_player=None) -> torch.Tensor:
     grid[15, :, :] = (float(len(world.player_ids)) - 2.0) / 2.0  # 2→0, 4→1
     grid[16] = _sun_mask
 
-    return torch.from_numpy(grid).to(DEVICE)
+    return torch.from_numpy(grid).to(device)

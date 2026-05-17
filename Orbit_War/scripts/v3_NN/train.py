@@ -2,6 +2,7 @@ import os
 import signal
 import random
 import warnings
+import multiprocessing as mp
 from collections import deque
 
 import numpy as np
@@ -189,7 +190,7 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
                 return []
 
             if collect_data:
-                state_np = encode_state(world, perspective_player=player_id).cpu().numpy()
+                state_np = encode_state(world, perspective_player=player_id, device="cpu").numpy()
                 mcts_inst = MCTS(train_net, c_puct=C_PUCT, num_simulations=n_simulations)
                 best_macro, probs = mcts_inst.run(world, legal_macros)
                 if best_macro is None:
@@ -246,6 +247,22 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
         samples.append((state_np, float(target_v), src_pi, tgt_pi, ship_pi))
     print(f"  Game finished ({n_agents}p), {len(samples)} samples.")
     return samples
+
+
+def _run_game_worker(args):
+    """多进程工作函数：在 CPU 上重建网络，跑一局，返回 samples。必须为顶层函数以支持 pickle。"""
+    net_sd, opp_info, n_simulations = args
+    net = PolicyValueNetwork(CHANNELS, BOARD_SIZE, RES_BLOCKS, RES_FILTERS)
+    net.load_state_dict(net_sd)
+    net.eval()
+    if isinstance(opp_info, dict):
+        opp_net = PolicyValueNetwork(CHANNELS, BOARD_SIZE, RES_BLOCKS, RES_FILTERS)
+        opp_net.load_state_dict(opp_info)
+        opp_net.eval()
+        opponent = opp_net
+    else:
+        opponent = opp_info  # None 或 "deepseek"
+    return play_one_game(net, opponent=opponent, n_simulations=n_simulations)
 
 
 class ReplayBuffer:
@@ -324,6 +341,21 @@ class Trainer:
         self.replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
         self.iteration = 0
         self.scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE == "cuda"))
+        self._pool = None
+
+    def _ensure_pool(self):
+        if self._pool is None:
+            n = min(NUM_WORKERS, NUM_PARALLEL_GAMES, mp.cpu_count())
+            ctx = mp.get_context("spawn")
+            self._pool = ctx.Pool(processes=n)
+            print(f"[multiprocessing] 进程池启动：{n} workers")
+        return self._pool
+
+    def _shutdown_pool(self):
+        if self._pool is not None:
+            self._pool.terminate()
+            self._pool.join()
+            self._pool = None
 
     def _load_random_opponent_net(self):
         """从已保存的 iter_*.pt 里随机加载一个旧版本作为对手网络。"""
@@ -436,6 +468,7 @@ class Trainer:
         def graceful_shutdown(signum, frame):
             print("\n检测到中断，保存检查点...")
             self.save_checkpoint(INTERRUPT_CHECKPOINT)
+            self._shutdown_pool()
             exit(0)
 
         signal.signal(signal.SIGINT, graceful_shutdown)
@@ -444,10 +477,18 @@ class Trainer:
         print(f"开始训练，当前迭代：{self.iteration}")
         while self.iteration < MAX_ITERATIONS:
             print(f"迭代 {self.iteration+1}: 生成对局数据...")
+            n_sim = self._current_n_simulations()
+            cpu_sd = {k: v.cpu() for k, v in self.net.state_dict().items()}
+            tasks = []
             for _ in range(NUM_PARALLEL_GAMES):
                 opponent = self._pick_opponent()
-                n_sim = self._current_n_simulations()
-                samples = play_one_game(self.net, opponent=opponent, n_simulations=n_sim)
+                if isinstance(opponent, torch.nn.Module):
+                    opp_info = {k: v.cpu() for k, v in opponent.state_dict().items()}
+                else:
+                    opp_info = opponent  # None 或 "deepseek"
+                tasks.append((cpu_sd, opp_info, n_sim))
+            pool = self._ensure_pool()
+            for samples in pool.map(_run_game_worker, tasks):
                 for item in samples:
                     self.replay_buffer.push(*item)
 
@@ -479,9 +520,11 @@ class Trainer:
             _append_csv_log(LOG_DIR, self.iteration, metrics, eval_results)
 
         print("训练达到最大迭代次数。")
+        self._shutdown_pool()
 
 
 if __name__ == "__main__":
+    mp.freeze_support()   # Windows spawn 必须
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     trainer = Trainer()
     trainer.run()
