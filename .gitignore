@@ -1,4 +1,5 @@
-Predicting_Irrigation_Need/*.csv
+Predicting_Irrigation_Need/data/*.csv
+Predicting_Irrigation_Need/output/submissions/*.csv
 catboost_info/
 __pycache__/
 .claude

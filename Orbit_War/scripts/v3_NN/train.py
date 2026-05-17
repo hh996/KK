@@ -470,62 +470,62 @@ class Trainer:
             self.load_checkpoint("latest")
         self.net.eval()
 
-        def graceful_shutdown(signum, frame):
-            print("\n检测到中断，保存检查点...")
-            self.save_checkpoint(INTERRUPT_CHECKPOINT)
-            self._shutdown_pool()
-            exit(0)
-
-        signal.signal(signal.SIGINT, graceful_shutdown)
-        signal.signal(signal.SIGTERM, graceful_shutdown)
+        # SIGTERM 也触发 KeyboardInterrupt，统一由 finally 处理
+        signal.signal(signal.SIGTERM, lambda s, f: (_ for _ in ()).throw(KeyboardInterrupt()))
 
         print(f"开始训练，当前迭代：{self.iteration}")
-        while self.iteration < MAX_ITERATIONS:
-            print(f"迭代 {self.iteration+1}: 生成对局数据...")
-            n_sim = self._current_n_simulations()
-            cpu_sd = {k: v.cpu() for k, v in self.net.state_dict().items()}
-            tasks = []
-            for _ in range(NUM_PARALLEL_GAMES):
-                opponent = self._pick_opponent()
-                if isinstance(opponent, torch.nn.Module):
-                    opp_info = {k: v.cpu() for k, v in opponent.state_dict().items()}
+        try:
+            while self.iteration < MAX_ITERATIONS:
+                print(f"迭代 {self.iteration+1}: 生成对局数据...")
+                n_sim = self._current_n_simulations()
+                cpu_sd = {k: v.cpu() for k, v in self.net.state_dict().items()}
+                tasks = []
+                for _ in range(NUM_PARALLEL_GAMES):
+                    opponent = self._pick_opponent()
+                    if isinstance(opponent, torch.nn.Module):
+                        opp_info = {k: v.cpu() for k, v in opponent.state_dict().items()}
+                    else:
+                        opp_info = opponent  # None 或 "deepseek"
+                    tasks.append((cpu_sd, opp_info, n_sim))
+                pool = self._ensure_pool()
+                for samples in pool.map(_run_game_worker, tasks):
+                    for item in samples:
+                        self.replay_buffer.push(*item)
+
+                print(f"训练 {TRAIN_EPOCHS_PER_ITER} 个 epoch...")
+                metrics = None
+                for _ in range(TRAIN_EPOCHS_PER_ITER):
+                    metrics = self.train_step()
+
+                self.iteration += 1
+                self.scheduler.step()
+
+                if self.iteration % SAVE_EVERY_ITERS == 0:
+                    self.save_checkpoint(f"iter_{self.iteration}")
+                    self.save_checkpoint("latest")
+                    print(f"检查点已保存 (iter {self.iteration})")
+
+                if metrics is not None:
+                    print(
+                        f"当前缓冲区大小：{len(self.replay_buffer)} | loss={metrics['loss']:.4f} "
+                        f"value={metrics['value_loss']:.4f} policy={metrics['policy_loss']:.4f}"
+                    )
                 else:
-                    opp_info = opponent  # None 或 "deepseek"
-                tasks.append((cpu_sd, opp_info, n_sim))
-            pool = self._ensure_pool()
-            for samples in pool.map(_run_game_worker, tasks):
-                for item in samples:
-                    self.replay_buffer.push(*item)
+                    print(f"当前缓冲区大小：{len(self.replay_buffer)}（batch 过小未训练 step）")
 
-            print(f"训练 {TRAIN_EPOCHS_PER_ITER} 个 epoch...")
-            metrics = None
-            for _ in range(TRAIN_EPOCHS_PER_ITER):
-                metrics = self.train_step()
+                eval_results = {}
+                if EVAL_EVERY_ITERS > 0 and self.iteration % EVAL_EVERY_ITERS == 0:
+                    eval_results = _trainer_eval(self.net)
 
-            self.iteration += 1
-            self.scheduler.step()
+                _append_csv_log(LOG_DIR, self.iteration, metrics, eval_results)
 
-            if self.iteration % SAVE_EVERY_ITERS == 0:
-                self.save_checkpoint(f"iter_{self.iteration}")
-                self.save_checkpoint("latest")
-                print(f"检查点已保存 (iter {self.iteration})")
+            print("训练达到最大迭代次数。")
 
-            if metrics is not None:
-                print(
-                    f"当前缓冲区大小：{len(self.replay_buffer)} | loss={metrics['loss']:.4f} "
-                    f"value={metrics['value_loss']:.4f} policy={metrics['policy_loss']:.4f}"
-                )
-            else:
-                print(f"当前缓冲区大小：{len(self.replay_buffer)}（batch 过小未训练 step）")
-
-            eval_results = {}
-            if EVAL_EVERY_ITERS > 0 and self.iteration % EVAL_EVERY_ITERS == 0:
-                eval_results = _trainer_eval(self.net)
-
-            _append_csv_log(LOG_DIR, self.iteration, metrics, eval_results)
-
-        print("训练达到最大迭代次数。")
-        self._shutdown_pool()
+        except KeyboardInterrupt:
+            print("\n检测到中断，保存检查点...")
+            self.save_checkpoint(INTERRUPT_CHECKPOINT)
+        finally:
+            self._shutdown_pool()
 
 
 if __name__ == "__main__":
