@@ -250,7 +250,8 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
 
 
 def _worker_init():
-    """限制每个 worker 的 PyTorch 内部线程数，防止 MKL 线程池把 CPU 打满。"""
+    """限制每个 worker 的 PyTorch 内部线程数；忽略 SIGINT 以便主进程统一处理 Ctrl+C。"""
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     torch.set_num_threads(1)
 
 
@@ -347,6 +348,16 @@ class Trainer:
         self.iteration = 0
         self.scaler = torch.amp.GradScaler("cuda", enabled=(DEVICE == "cuda"))
         self._pool = None
+        self._stopping = False
+
+    def _handle_interrupt(self, signum, frame):
+        """Ctrl+C / kill：立刻 terminate 进程池，避免 pool.map 一直等到 worker 跑完。"""
+        if self._stopping:
+            raise KeyboardInterrupt()
+        self._stopping = True
+        print("\n收到中断信号，正在停止 worker 进程...")
+        self._shutdown_pool()
+        raise KeyboardInterrupt()
 
     def _ensure_pool(self):
         if self._pool is None:
@@ -358,6 +369,7 @@ class Trainer:
 
     def _shutdown_pool(self):
         if self._pool is not None:
+            self._stopping = True
             self._pool.terminate()
             self._pool.join()
             self._pool = None
@@ -470,8 +482,8 @@ class Trainer:
             self.load_checkpoint("latest")
         self.net.eval()
 
-        # SIGTERM 也触发 KeyboardInterrupt，统一由 finally 处理
-        signal.signal(signal.SIGTERM, lambda s, f: (_ for _ in ()).throw(KeyboardInterrupt()))
+        signal.signal(signal.SIGINT, self._handle_interrupt)
+        signal.signal(signal.SIGTERM, self._handle_interrupt)
 
         print(f"开始训练，当前迭代：{self.iteration}")
         try:
@@ -488,9 +500,17 @@ class Trainer:
                         opp_info = opponent  # None 或 "deepseek"
                     tasks.append((cpu_sd, opp_info, n_sim))
                 pool = self._ensure_pool()
-                for samples in pool.map(_run_game_worker, tasks):
-                    for item in samples:
-                        self.replay_buffer.push(*item)
+                try:
+                    for samples in pool.imap(_run_game_worker, tasks):
+                        for item in samples:
+                            self.replay_buffer.push(*item)
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    if self._stopping:
+                        raise KeyboardInterrupt() from exc
+                    raise
+                self._stopping = False
 
                 print(f"训练 {TRAIN_EPOCHS_PER_ITER} 个 epoch...")
                 metrics = None
