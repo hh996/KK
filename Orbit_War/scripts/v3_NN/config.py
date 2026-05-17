@@ -71,7 +71,19 @@ SHIP_BUCKET_COUNT = 11
 SAVE_EVERY_ITERS = 20  # 每多少迭代保存 iter_* 与 latest
 EVAL_EVERY_ITERS = 50  # 每多少迭代对 random 评估一次；0 可关闭
 MAX_ITERATIONS = 100000  # 外层 while 上限；Ctrl+C 会先存 interrupt 再退出
-TRAIN_MCTS_SIMULATIONS = 50   # 训练时用
+TRAIN_MCTS_SIMULATIONS = 20   # 初始模拟数；达到 MCTS_SIM_BOOST_ITER 后自动升到 MCTS_SIM_FULL
+MCTS_SIM_FULL      = 50   # 提升后的模拟数
+MCTS_SIM_BOOST_ITER = 150  # 迭代数达到此值后自动切换（与 DEEPSEEK_START_ITER 对齐）
+
+# =============================================================================
+# 训练对手课程（Curriculum）
+# =============================================================================
+# 第一阶段（iter < DEEPSEEK_START_ITER）：纯自博弈
+# 第二阶段（iter < POOL_START_ITER）：自博弈 + 以 DEEPSEEK_OPP_PROB 概率混入 deepseek
+# 第三阶段（iter >= POOL_START_ITER）：自博弈 + deepseek + 随机旧 checkpoint
+DEEPSEEK_START_ITER = 150   # 开始混入 deepseek 的迭代数
+POOL_START_ITER     = 400   # 开始使用对手池（旧 checkpoint）的迭代数
+DEEPSEEK_OPP_PROB   = 0.5   # 混入 deepseek 的概率
 
 # =============================================================================
 # 中断恢复：save/load 时文件名前缀（实际文件为 {name}.pt）

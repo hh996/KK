@@ -4,6 +4,14 @@ from physics import WorldState, CENTER_X, CENTER_Y, SUN_R
 from config import BOARD_SIZE, CHANNELS, DEVICE
 
 
+# 太阳 mask 固定不变，模块加载时预计算一次
+_sun_mask = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=np.float32)
+for _y in range(BOARD_SIZE):
+    for _x in range(BOARD_SIZE):
+        if (_x - CENTER_X) ** 2 + (_y - CENTER_Y) ** 2 <= SUN_R ** 2:
+            _sun_mask[_y, _x] = 1.0
+
+
 def encode_state(world: WorldState, perspective_player=None) -> torch.Tensor:
     if perspective_player is None:
         perspective_player = world.my_id
@@ -62,10 +70,6 @@ def encode_state(world: WorldState, perspective_player=None) -> torch.Tensor:
     # 全局量
     grid[14, :, :] = step_norm
     grid[15, :, :] = (float(len(world.player_ids)) - 2.0) / 2.0  # 2→0, 4→1
-    # 太阳 mask (ch16)
-    for x in range(W):
-        for y in range(H):
-            if (x - CENTER_X) ** 2 + (y - CENTER_Y) ** 2 <= SUN_R ** 2:
-                grid[16, y, x] = 1.0
+    grid[16] = _sun_mask
 
     return torch.from_numpy(grid).to(DEVICE)

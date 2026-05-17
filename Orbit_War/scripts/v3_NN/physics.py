@@ -356,6 +356,134 @@ def predict_fleet_arrival(fleet, planets, omega_map, cid_to_group, comet_ids,
     return (max_turns + 1, None)
 
 
+def generate_comet_paths(
+    initial_planets,
+    angular_velocity,
+    spawn_step,
+    comet_planet_ids=None,
+    comet_speed=4.0,
+    rng=None,
+    board_size=BOARD_SIZE,
+    sun_radius=SUN_R,
+):
+    """从官方 orbit_wars.py 移植，替换硬编码常量为可配置参数。"""
+    if rng is None:
+        rng = random
+    if comet_planet_ids is None:
+        comet_planet_ids = set()
+    else:
+        comet_planet_ids = set(comet_planet_ids)
+
+    center = board_size / 2.0
+
+    for _ in range(300):
+        e = rng.uniform(0.75, 0.93)
+        a = rng.uniform(60, 150)
+        perihelion = a * (1 - e)
+        if perihelion < sun_radius + COMET_RADIUS:
+            continue
+
+        b = a * math.sqrt(1 - e ** 2)
+        c_val = a * e
+        phi = rng.uniform(math.pi / 6, math.pi / 3)
+
+        dense = []
+        num = 5000
+        for i in range(num):
+            t = 0.3 * math.pi + 1.4 * math.pi * i / (num - 1)
+            ex = c_val + a * math.cos(t)
+            ey = b * math.sin(t)
+            x = center + ex * math.cos(phi) - ey * math.sin(phi)
+            y = center + ex * math.sin(phi) + ey * math.cos(phi)
+            dense.append((x, y))
+
+        path = [dense[0]]
+        cum = 0.0
+        target = comet_speed
+        for i in range(1, len(dense)):
+            cum += _distance(dense[i], dense[i - 1])
+            if cum >= target:
+                path.append(dense[i])
+                target += comet_speed
+
+        board_start = None
+        board_end = None
+        for i, (x, y) in enumerate(path):
+            if 0 <= x <= board_size and 0 <= y <= board_size:
+                if board_start is None:
+                    board_start = i
+                board_end = i
+
+        if board_start is None:
+            continue
+        visible = path[board_start: board_end + 1]
+        if not (5 <= len(visible) <= 40):
+            continue
+
+        paths = [
+            [[y, x] for x, y in visible],
+            [[board_size - x, y] for x, y in visible],
+            [[x, board_size - y] for x, y in visible],
+            [[board_size - y, board_size - x] for x, y in visible],
+        ]
+
+        static_planets = []
+        orbiting_planets = []
+        for planet in initial_planets:
+            if planet[0] in comet_planet_ids:
+                continue
+            pr = _distance((planet[2], planet[3]), (center, center))
+            if pr + planet[4] < ROTATION_LIMIT:
+                orbiting_planets.append(planet)
+            else:
+                static_planets.append(planet)
+
+        valid = True
+        buf = COMET_RADIUS + 0.5
+        for k, (cx, cy) in enumerate(visible):
+            if _distance((cx, cy), (center, center)) < sun_radius + COMET_RADIUS:
+                valid = False
+                break
+
+            sym_pts = [
+                (cy, cx),
+                (board_size - cx, cy),
+                (cx, board_size - cy),
+                (board_size - cy, board_size - cx),
+            ]
+            for planet in static_planets:
+                for sp in sym_pts:
+                    if _distance(sp, (planet[2], planet[3])) < planet[4] + buf:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if not valid:
+                break
+
+            game_step = spawn_step - 1 + k
+            for planet in orbiting_planets:
+                dx = planet[2] - center
+                dy = planet[3] - center
+                orb_r = math.hypot(dx, dy)
+                init_angle = math.atan2(dy, dx)
+                cur_angle = init_angle + angular_velocity * game_step
+                px = center + orb_r * math.cos(cur_angle)
+                py = center + orb_r * math.sin(cur_angle)
+                for sp in sym_pts:
+                    if _distance(sp, (px, py)) < planet[4] + COMET_RADIUS:
+                        valid = False
+                        break
+                if not valid:
+                    break
+            if not valid:
+                break
+
+        if valid:
+            return paths
+    return None
+
+
 # ---------------------------------------------------------------------------
 # WorldState
 # ---------------------------------------------------------------------------
@@ -363,7 +491,8 @@ class WorldState:
     def __init__(self, planets, fleets, initial_planets, step, base_omega,
                  comets, comet_ids, player_ids, my_id,
                  num_training_agents=None, episode_seed=None,
-                 comet_speed=4.0, ship_speed=None, sun_radius=None, board_size=None):
+                 comet_speed=4.0, ship_speed=None, sun_radius=None, board_size=None,
+                 _precomputed_fleet_arrivals=None):
         self.ship_speed = float(MAX_SPEED if ship_speed is None else ship_speed)
         self.sun_r = float(SUN_R if sun_radius is None else sun_radius)
         self.board_size = float(BOARD_SIZE if board_size is None else board_size)
@@ -372,6 +501,7 @@ class WorldState:
         self.planets = {p.id: p for p in self.planet_list}
         self.fleet_by_id = {f.id: f for f in self.fleets}
         self.initial_planets = copy.deepcopy(initial_planets)
+        self._initial_planets_dict = {ip[0]: ip for ip in self.initial_planets}
         self.step_count = int(step)
         self.base_omega = base_omega
         self.comets = copy.deepcopy(comets)
@@ -387,12 +517,16 @@ class WorldState:
         self.num_training_agents = num_training_agents if num_training_agents is not None else len(raw_ids)
         self.player_ids = list(range(self.num_training_agents)) if self.num_training_agents >= 2 else (raw_ids if raw_ids else [0, 1])
         self.my_id = my_id
-        self.fleet_arrivals = {}
-        for f in self.fleets:
-            self.fleet_arrivals[f.id] = predict_fleet_arrival(
-                f, self.planet_list, self.omega_map, self.cid_to_group, self.comet_ids,
-                max_speed=self.ship_speed, board_size=self.board_size, sun_r=self.sun_r,
-            )
+        if _precomputed_fleet_arrivals is not None:
+            self.fleet_arrivals = dict(_precomputed_fleet_arrivals)
+        else:
+            self.fleet_arrivals = {}
+            for f in self.fleets:
+                self.fleet_arrivals[f.id] = predict_fleet_arrival(
+                    f, self.planet_list, self.omega_map, self.cid_to_group, self.comet_ids,
+                    max_speed=self.ship_speed, board_size=self.board_size, sun_r=self.sun_r,
+                )
+        self._intercept_cache = {}
 
     def clone(self):
         cloned = WorldState(
@@ -402,6 +536,7 @@ class WorldState:
             self.num_training_agents, episode_seed=self.episode_seed,
             comet_speed=self.comet_speed, ship_speed=self.ship_speed,
             sun_radius=self.sun_r, board_size=self.board_size,
+            _precomputed_fleet_arrivals=self.fleet_arrivals,
         )
         return cloned
 
@@ -423,7 +558,12 @@ class WorldState:
                 for ships in {max(1, tgt.ships+1), min(max_send, tgt.ships+5), max_send}:
                     if ships <= 0 or ships > max_send:
                         continue
-                    result = compute_intercept_with_detour(src, tgt, ships, self)
+                    key = (src.id, tgt.id, ships)
+                    if key in self._intercept_cache:
+                        result = self._intercept_cache[key]
+                    else:
+                        result = compute_intercept_with_detour(src, tgt, ships, self)
+                        self._intercept_cache[key] = result
                     if result is not None:
                         angle, eta, _ = result
                         actions.append((src.id, tgt.id, ships, angle, eta))
@@ -445,14 +585,13 @@ class WorldState:
     def get_legal_macro_actions(self, player_id, max_fleets=2, max_macros=450):
         k = max(1, min(int(max_fleets), MAX_FLEETS_PER_TURN))
         atoms = self.get_atomic_legal_actions(player_id)
-        macros = [(a,) for a in atoms]
+        macros = [()]                           # PASS：不发任何舰队
+        macros += [(a,) for a in atoms]
         if k < 2 or len(atoms) < 2:
             return macros[:max_macros]
         cap_i = min(len(atoms), 36)
         for i in range(cap_i):
-            for j in range(cap_i):
-                if i == j:
-                    continue
+            for j in range(i + 1, cap_i):
                 a_i, b_j = atoms[i], atoms[j]
                 if self.atomic_pair_compatible(player_id, a_i, b_j):
                     macros.append((a_i, b_j))
@@ -538,6 +677,8 @@ class WorldState:
         self.planet_list = [p for p in self.planet_list if p.id not in expired_set]
         self.planets = {p.id: p for p in self.planet_list}
         self.initial_planets = [p for p in self.initial_planets if p[0] not in expired_set]
+        for pid in expired_set:
+            self._initial_planets_dict.pop(pid, None)
         self.comet_ids = set(pid for pid in self.comet_ids if pid not in expired_set)
         for group in list(self.comets):
             new_ids = [pid for pid in group.get("planet_ids", []) if pid not in expired_set]
@@ -571,6 +712,7 @@ class WorldState:
             self.comet_ids.add(pid)
             row = [pid, -1, -99.0, -99.0, COMET_RADIUS, comet_ships, COMET_PRODUCTION]
             self.initial_planets.append(list(row))
+            self._initial_planets_dict[pid] = list(row)
             pl = Planet(pid, -1, -99.0, -99.0, COMET_RADIUS, comet_ships, COMET_PRODUCTION)
             self.planet_list.append(pl)
             self.planets[pid] = pl
@@ -585,9 +727,18 @@ class WorldState:
             if p.id in self.comet_ids:
                 continue
             old_pos = (p.x, p.y)
-            if is_orbital(p):
-                nx, ny = predict_orbit_position(p, self.omega_map.get(p.id, 0.0), 1.0)
-                planet_paths[p.id] = (old_pos, (nx, ny), True)
+            init_p = self._initial_planets_dict.get(p.id)
+            if init_p is not None:
+                dx = init_p[2] - CENTER_X
+                dy = init_p[3] - CENTER_Y
+                r = math.hypot(dx, dy)
+                if r + p.radius < ROTATION_LIMIT:
+                    new_angle = math.atan2(dy, dx) + self.base_omega * self.step_count
+                    nx = CENTER_X + r * math.cos(new_angle)
+                    ny = CENTER_Y + r * math.sin(new_angle)
+                    planet_paths[p.id] = (old_pos, (nx, ny), True)
+                else:
+                    planet_paths[p.id] = (old_pos, old_pos, True)
             else:
                 planet_paths[p.id] = (old_pos, old_pos, True)
 

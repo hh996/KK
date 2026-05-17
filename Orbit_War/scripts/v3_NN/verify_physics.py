@@ -76,7 +76,7 @@ def compare_snapshots(official_steps, physics_snapshots, max_diff=0.01):
 
 if __name__ == "__main__":
     SEED = 42
-    official = run_official_env(seed=SEED, steps=30)
+    official = run_official_env(seed=SEED, steps=60)
     init_obs = official[0][0]["observation"]
-    physics_snaps = run_physics_sim(init_obs, seed=SEED, steps=30)
+    physics_snaps = run_physics_sim(init_obs, seed=SEED, steps=60)
     compare_snapshots(official, physics_snaps)
