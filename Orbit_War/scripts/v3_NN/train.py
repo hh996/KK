@@ -249,6 +249,11 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
     return samples
 
 
+def _worker_init():
+    """限制每个 worker 的 PyTorch 内部线程数，防止 MKL 线程池把 CPU 打满。"""
+    torch.set_num_threads(1)
+
+
 def _run_game_worker(args):
     """多进程工作函数：在 CPU 上重建网络，跑一局，返回 samples。必须为顶层函数以支持 pickle。"""
     net_sd, opp_info, n_simulations = args
@@ -347,7 +352,7 @@ class Trainer:
         if self._pool is None:
             n = min(NUM_WORKERS, NUM_PARALLEL_GAMES, mp.cpu_count())
             ctx = mp.get_context("spawn")
-            self._pool = ctx.Pool(processes=n)
+            self._pool = ctx.Pool(processes=n, initializer=_worker_init)
             print(f"[multiprocessing] 进程池启动：{n} workers")
         return self._pool
 
