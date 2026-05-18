@@ -271,6 +271,57 @@ def _run_game_worker(args):
     return play_one_game(net, opponent=opponent, n_simulations=n_simulations)
 
 
+_EVAL_SIMS = min(48, MCTS_SIMULATIONS)
+
+
+def _eval_game_worker(args):
+    """评估 worker：单局 net vs 对手，返回是否获胜(bool)。"""
+    import importlib
+    import importlib.util as _ilu
+    net_sd, opponent_type, hero, num_agents, seed = args
+
+    net = PolicyValueNetwork(CHANNELS, BOARD_SIZE, RES_BLOCKS, RES_FILTERS)
+    net.load_state_dict(net_sd)
+    net.eval()
+
+    if opponent_type == "random":
+        orb = importlib.import_module("kaggle_environments.envs.orbit_wars.orbit_wars")
+        opp_fn = orb.random_agent
+    else:
+        v1_path = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "v1_rule", "v1_deepseek", "main.py"
+        ))
+        spec = _ilu.spec_from_file_location("_v1ds_eval", v1_path)
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        opp_fn = mod.agent
+
+    env = make("orbit_wars", debug=False,
+               configuration={"episodeSteps": MAX_GAME_STEPS, "seed": seed})
+
+    def _net_agent(obs, config):
+        info = getattr(env, "info", None) or {}
+        ep_seed = info.get("seed")
+        cs = float(_read(config, "cometSpeed", 4.0) or 4.0)
+        sp = float(_read(config, "shipSpeed", MAX_SPEED) or MAX_SPEED)
+        su = float(_read(config, "sunRadius", SUN_R) or SUN_R)
+        bd = float(_read(config, "boardSize", PHYS_BOARD_SIZE) or PHYS_BOARD_SIZE)
+        world = build_world_from_obs(obs, hero, num_agents, episode_seed=ep_seed,
+                                     comet_speed=cs, ship_speed=sp, sun_radius=su, board_size=bd)
+        if world.is_terminal():
+            return []
+        macs = world.get_legal_macro_actions(hero)
+        if not macs:
+            return []
+        bm, _ = MCTS(net, num_simulations=_EVAL_SIMS, c_puct=C_PUCT).run(world, macs)
+        return macro_to_env_moves(bm) if bm is not None else []
+
+    roster = [_net_agent if i == hero else opp_fn for i in range(num_agents)]
+    env.run(roster)
+    rr = env.steps[-1][hero].reward if hero < len(env.steps[-1]) else 0
+    return float(rr) > 0
+
+
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
@@ -310,28 +361,44 @@ def _append_csv_log(log_dir, iteration, metrics, eval_results):
                 f"{eval_results.get('wins_deepseek_4p','')}\n")
 
 
-def _trainer_eval(net):
-    from eval_orbit_wars import evaluate_net_vs_random, evaluate_net_vs_deepseek
-    results = {}
-    ep = min(8, GAME_EVAL_EPISODES)
-    ep4 = max(4, ep // 2)   # 4P 局数略少，每局更慢
+def _trainer_eval(net, pool):
+    """并行评估：所有对局同时提交给进程池，比串行快 N 倍。"""
+    cpu_sd = {k: v.cpu() for k, v in net.state_dict().items()}
+    rng = random.Random(42)
+    ep  = min(8, GAME_EVAL_EPISODES)
+    ep4 = max(4, ep // 2)
 
-    for num_agents, label in [(2, "2p"), (4, "4p")]:
-        episodes = ep if num_agents == 2 else ep4
-        try:
-            wins, total = evaluate_net_vs_random(net, episodes=episodes, num_agents=num_agents)
-            print(f"  [eval] vs random   ({total} ep {label}): {wins}/{total}")
-            results[f"wins_random_{label}"] = wins
-        except Exception as ex:
-            print(f"  [eval] vs random {label} skipped: {ex}")
-            results[f"wins_random_{label}"] = ""
-        try:
-            wins, total = evaluate_net_vs_deepseek(net, episodes=episodes, num_agents=num_agents)
-            print(f"  [eval] vs deepseek ({total} ep {label}): {wins}/{total}")
-            results[f"wins_deepseek_{label}"] = wins
-        except Exception as ex:
-            print(f"  [eval] vs deepseek {label} skipped: {ex}")
-            results[f"wins_deepseek_{label}"] = ""
+    tasks = []
+    task_labels = []
+    for opp in ["random", "deepseek"]:
+        for n_agents, label in [(2, "2p"), (4, "4p")]:
+            n_ep = ep if n_agents == 2 else ep4
+            for _ in range(n_ep):
+                hero = rng.randrange(n_agents)
+                seed = rng.randint(0, 2 ** 30 - 1)
+                tasks.append((cpu_sd, opp, hero, n_agents, seed))
+                task_labels.append(f"{opp}_{label}")
+
+    wins_map  = {lbl: 0 for lbl in set(task_labels)}
+    total_map = {lbl: 0 for lbl in set(task_labels)}
+    try:
+        outcomes = pool.map(_eval_game_worker, tasks)
+    except Exception as ex:
+        print(f"  [eval] 并行评估失败: {ex}")
+        return {}
+
+    for label, won in zip(task_labels, outcomes):
+        total_map[label] += 1
+        if won:
+            wins_map[label] += 1
+
+    results = {}
+    for opp in ["random", "deepseek"]:
+        for _, label in [(2, "2p"), (4, "4p")]:
+            key = f"{opp}_{label}"
+            w, t = wins_map.get(key, 0), total_map.get(key, 0)
+            print(f"  [eval] vs {opp} ({t} ep {label}): {w}/{t}")
+            results[f"wins_{key}"] = w
     return results
 
 
@@ -535,7 +602,7 @@ class Trainer:
 
                 eval_results = {}
                 if EVAL_EVERY_ITERS > 0 and self.iteration % EVAL_EVERY_ITERS == 0:
-                    eval_results = _trainer_eval(self.net)
+                    eval_results = _trainer_eval(self.net, pool)
 
                 _append_csv_log(LOG_DIR, self.iteration, metrics, eval_results)
 
