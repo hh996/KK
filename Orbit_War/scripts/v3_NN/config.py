@@ -58,7 +58,7 @@ GAME_EVAL_EPISODES = 12
 BATCH_SIZE = 128  # 每步梯度用的样本数；受显存与 replay 大小约束
 LEARNING_RATE = 1e-3  # Adam 学习率
 WEIGHT_DECAY = 1e-4  # Adam L2 权重衰减
-REPLAY_BUFFER_SIZE = 20000  # 自博弈样本 FIFO 容量
+REPLAY_BUFFER_SIZE = 10000  # 自博弈样本 FIFO 容量
 # 每个迭代里调用 train_step 的次数（缓冲区够大时约等于每轮梯度步数；不是「扫一遍数据集」）。
 TRAIN_EPOCHS_PER_ITER = 5
 POLICY_LOSS_WEIGHT = 1.0  # 总 loss 里 policy（三头交叉熵之和）的系数

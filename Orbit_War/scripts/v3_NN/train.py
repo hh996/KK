@@ -327,7 +327,7 @@ class ReplayBuffer:
         self.buffer = deque(maxlen=capacity)
 
     def push(self, state, value, src_pi, tgt_pi, ship_pi):
-        self.buffer.append((state, value, src_pi, tgt_pi, ship_pi))
+        self.buffer.append((state.astype(np.float16), value, src_pi, tgt_pi, ship_pi))
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, min(batch_size, len(self.buffer)))
@@ -544,8 +544,26 @@ class Trainer:
             "policy_loss": float(policy_loss.item()),
         }
 
+    def _checkpoint_iteration(self, name):
+        """读取 checkpoint 里的 iteration 字段，文件不存在返回 -1。"""
+        path = os.path.join(CHECKPOINT_DIR, f"{name}.pt")
+        if not os.path.exists(path):
+            return -1
+        try:
+            ck = torch.load(path, map_location="cpu", weights_only=False)
+            return int(ck.get("iteration", 0))
+        except Exception:
+            return -1
+
     def run(self):
-        if not self.load_checkpoint(INTERRUPT_CHECKPOINT):
+        int_iter = self._checkpoint_iteration(INTERRUPT_CHECKPOINT)
+        lat_iter = self._checkpoint_iteration("latest")
+        if int_iter >= lat_iter:
+            loaded = self.load_checkpoint(INTERRUPT_CHECKPOINT)
+            if not loaded:
+                self.load_checkpoint("latest")
+        else:
+            print(f"[resume] latest({lat_iter}) > interrupt({int_iter})，加载 latest")
             self.load_checkpoint("latest")
         self.net.eval()
 
