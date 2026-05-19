@@ -50,7 +50,7 @@ MAX_FLEETS_PER_TURN = 2
 # MCTS 模拟对手时：按网络先验对合法宏采样几次，取最后一次（增大则对手更随机）。
 OPPONENT_SAMPLES = 1
 # eval_orbit_wars 里 quick eval 的局数上限（train 里还会再 min 一次）。
-GAME_EVAL_EPISODES = 12
+GAME_EVAL_EPISODES = 30
 
 # =============================================================================
 # 训练（train.py）
@@ -65,7 +65,7 @@ POLICY_LOSS_WEIGHT = 1.0  # 总 loss 里 policy（三头交叉熵之和）的系
 VALUE_LOSS_WEIGHT = 1.0  # 总 loss 里 value MSE 的系数
 # MCTS 叶节点非纯终局时：终局价值 = 0.5*env 语义 ±1 + 0.5*tanh((我方总分-最强对手)/该尺度)。
 # 调大则 tanh 部分更「钝」、数值更接近 0；与「船数」无直接关系。
-VALUE_TARGET_SCALE = 1.0
+VALUE_TARGET_SCALE = 100.0
 # 派兵数量离散分桶数：network 的 ship 头维度、build_policy_targets / ship_bucket_idx 须一致。
 SHIP_BUCKET_COUNT = 11
 SAVE_EVERY_ITERS = 20  # 每多少迭代保存 iter_* 与 latest

@@ -275,7 +275,9 @@ _EVAL_SIMS = min(48, MCTS_SIMULATIONS)
 
 
 def _eval_game_worker(args):
-    """评估 worker：单局 net vs 对手，返回是否获胜(bool)。"""
+    """评估 worker：单局 net vs 对手，返回是否获胜(bool)。
+    4P 时用对角线 2 个 hero 槽位（2v2），2P 用 1 个 hero 槽位。
+    """
     import importlib
     import importlib.util as _ilu
     net_sd, opponent_type, hero, num_agents, seed = args
@@ -299,24 +301,29 @@ def _eval_game_worker(args):
     env = make("orbit_wars", debug=False,
                configuration={"episodeSteps": MAX_GAME_STEPS, "seed": seed})
 
-    def _net_agent(obs, config):
-        info = getattr(env, "info", None) or {}
-        ep_seed = info.get("seed")
-        cs = float(_read(config, "cometSpeed", 4.0) or 4.0)
-        sp = float(_read(config, "shipSpeed", MAX_SPEED) or MAX_SPEED)
-        su = float(_read(config, "sunRadius", SUN_R) or SUN_R)
-        bd = float(_read(config, "boardSize", PHYS_BOARD_SIZE) or PHYS_BOARD_SIZE)
-        world = build_world_from_obs(obs, hero, num_agents, episode_seed=ep_seed,
-                                     comet_speed=cs, ship_speed=sp, sun_radius=su, board_size=bd)
-        if world.is_terminal():
-            return []
-        macs = world.get_legal_macro_actions(hero)
-        if not macs:
-            return []
-        bm, _ = MCTS(net, num_simulations=_EVAL_SIMS, c_puct=C_PUCT).run(world, macs)
-        return macro_to_env_moves(bm) if bm is not None else []
+    # 4P：对角线两个槽位都用 net（2v2）；2P：只有 hero 一个槽位
+    hero_slots = {hero, (hero + 2) % 4} if num_agents == 4 else {hero}
 
-    roster = [_net_agent if i == hero else opp_fn for i in range(num_agents)]
+    def _make_net_agent(pid):
+        def _agent(obs, config):
+            info = getattr(env, "info", None) or {}
+            ep_seed = info.get("seed")
+            cs = float(_read(config, "cometSpeed", 4.0) or 4.0)
+            sp = float(_read(config, "shipSpeed", MAX_SPEED) or MAX_SPEED)
+            su = float(_read(config, "sunRadius", SUN_R) or SUN_R)
+            bd = float(_read(config, "boardSize", PHYS_BOARD_SIZE) or PHYS_BOARD_SIZE)
+            world = build_world_from_obs(obs, pid, num_agents, episode_seed=ep_seed,
+                                         comet_speed=cs, ship_speed=sp, sun_radius=su, board_size=bd)
+            if world.is_terminal():
+                return []
+            macs = world.get_legal_macro_actions(pid)
+            if not macs:
+                return []
+            bm, _ = MCTS(net, num_simulations=_EVAL_SIMS, c_puct=C_PUCT).run(world, macs)
+            return macro_to_env_moves(bm) if bm is not None else []
+        return _agent
+
+    roster = [_make_net_agent(i) if i in hero_slots else opp_fn for i in range(num_agents)]
     env.run(roster)
     rr = env.steps[-1][hero].reward if hero < len(env.steps[-1]) else 0
     return float(rr) > 0
@@ -365,7 +372,7 @@ def _trainer_eval(net, pool):
     """并行评估：所有对局同时提交给进程池，比串行快 N 倍。"""
     cpu_sd = {k: v.cpu() for k, v in net.state_dict().items()}
     rng = random.Random(42)
-    ep  = min(8, GAME_EVAL_EPISODES)
+    ep  = GAME_EVAL_EPISODES
     ep4 = max(4, ep // 2)
 
     tasks = []
