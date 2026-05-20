@@ -197,7 +197,14 @@ def play_one_game(net, opponent=None, n_simulations=TRAIN_MCTS_SIMULATIONS):
                     return []
                 src_pi, tgt_pi, ship_pi = build_policy_targets(world, legal_macros, probs)
                 game_history.append((player_id, state_np, src_pi, tgt_pi, ship_pi))
-                return macro_to_env_moves(best_macro)
+                step_num = int(_read(obs, "step", 0) or 0)
+                if step_num < TEMPERATURE_STEPS and len(legal_macros) > 1 and probs.sum() > 0:
+                    p = probs / probs.sum()
+                    idx = np.random.choice(len(legal_macros), p=p)
+                    chosen = legal_macros[idx]
+                else:
+                    chosen = best_macro
+                return macro_to_env_moves(chosen)
             else:
                 # 对手网络：同样用 MCTS 但不收集数据
                 mcts_inst = MCTS(train_net, c_puct=C_PUCT, num_simulations=n_simulations)
@@ -327,6 +334,111 @@ def _eval_game_worker(args):
     env.run(roster)
     rr = env.steps[-1][hero].reward if hero < len(env.steps[-1]) else 0
     return float(rr) > 0
+
+
+def _match_env_action_to_macro(env_action, legal_macros):
+    """将 deepseek env_action ([[src, angle, ships],...]) 匹配到最近合法宏动作。"""
+    if not legal_macros:
+        return None
+    if not env_action:
+        for mac in legal_macros:
+            if not mac:
+                return mac
+        return legal_macros[0]
+    ea_by_src = {int(e[0]): (float(e[1]), float(e[2])) for e in env_action}
+    best_mac, best_score = legal_macros[0], -1.0
+    for mac in legal_macros:
+        score = 0.0
+        for atom in mac:
+            src_id = int(atom[0])
+            if src_id in ea_by_src:
+                ea_angle, ea_ships = ea_by_src[src_id]
+                da = abs(float(atom[3]) - ea_angle) % 360
+                da = min(da, 360 - da)
+                score += 1.0 / (1.0 + da) + 0.1 / (1.0 + abs(float(atom[2]) - ea_ships))
+        if score > best_score:
+            best_score = score
+            best_mac = mac
+    return best_mac
+
+
+def generate_deepseek_demos(n_games):
+    """运行 deepseek 自博弈，收集模仿学习样本。返回 [(state, value, src_pi, tgt_pi, ship_pi), ...]。"""
+    deepseek_fn = _load_deepseek_agent()
+    all_samples = []
+
+    for game_idx in range(n_games):
+        n_agents = 2 if random.random() < TRAIN_TWO_PLAYER_PROB else 4
+        env = make("orbit_wars", debug=False, configuration={"episodeSteps": MAX_GAME_STEPS})
+        game_history = []
+
+        def make_demo_agent(player_id):
+            def agent(obs, config):
+                info = getattr(env, "info", None) or {}
+                ep_seed = info.get("seed") or 0
+                cs = float(_read(config, "cometSpeed", 4.0) or 4.0)
+                sp = float(_read(config, "shipSpeed", MAX_SPEED) or MAX_SPEED)
+                su = float(_read(config, "sunRadius", SUN_R) or SUN_R)
+                bd = float(_read(config, "boardSize", PHYS_BOARD_SIZE) or PHYS_BOARD_SIZE)
+                world = build_world_from_obs(
+                    obs, player_id, n_agents,
+                    episode_seed=ep_seed, comet_speed=cs,
+                    ship_speed=sp, sun_radius=su, board_size=bd,
+                )
+                if world.is_terminal():
+                    return []
+                legal_macros = world.get_legal_macro_actions(player_id)
+                if not legal_macros:
+                    return []
+                ds_action = deepseek_fn(obs, config)
+                if ds_action is None:
+                    ds_action = []
+                matched = _match_env_action_to_macro(ds_action, legal_macros)
+                if matched is None:
+                    return ds_action or []
+                matched_idx = next(
+                    (i for i, m in enumerate(legal_macros) if m == matched), 0
+                )
+                probs = np.zeros(len(legal_macros), dtype=np.float32)
+                probs[matched_idx] = 1.0
+                state_np = encode_state(world, perspective_player=player_id, device="cpu").numpy()
+                src_pi, tgt_pi, ship_pi = build_policy_targets(world, legal_macros, probs)
+                game_history.append((player_id, state_np, src_pi, tgt_pi, ship_pi))
+                return macro_to_env_moves(matched)
+            return agent
+
+        agents = [make_demo_agent(i) for i in range(n_agents)]
+        env.run(agents)
+
+        final_step = env.steps[-1]
+        scores = {i: float((s.reward if s.reward is not None else 0.0))
+                  for i, s in enumerate(final_step)}
+        participant_ids = list(range(n_agents))
+        final_obs = (final_step[0].observation if hasattr(final_step[0], "observation")
+                     else (final_step[0].get("observation", {}) if isinstance(final_step[0], dict) else {}))
+        final_ships = {}
+        for p in (_read(final_obs, "planets", []) or []):
+            if p[1] != -1:
+                final_ships[p[1]] = final_ships.get(p[1], 0) + p[5]
+        for f in (_read(final_obs, "fleets", []) or []):
+            if f[1] != -1:
+                final_ships[f[1]] = final_ships.get(f[1], 0) + f[6]
+
+        for pid, state_np, src_pi, tgt_pi, ship_pi in game_history:
+            ev = env_terminal_value(scores, pid, participant_ids=participant_ids)
+            my_s = float(final_ships.get(pid, 0.0))
+            best_other = max(
+                (float(final_ships.get(p, 0.0)) for p in participant_ids if p != pid),
+                default=0.0,
+            )
+            diff = (my_s - best_other) / max(1.0, float(VALUE_TARGET_SCALE))
+            target_v = 0.5 * ev + 0.5 * float(np.tanh(diff))
+            all_samples.append((state_np, float(target_v), src_pi, tgt_pi, ship_pi))
+
+        if (game_idx + 1) % 10 == 0:
+            print(f"  [pretrain] 示范对局 {game_idx + 1}/{n_games}，当前样本数: {len(all_samples)}")
+
+    return all_samples
 
 
 class ReplayBuffer:
@@ -562,6 +674,34 @@ class Trainer:
         except Exception:
             return -1
 
+    def pretrain(self):
+        """模仿学习预训练：生成 deepseek 示范数据，预热策略网络，打破冷启动。"""
+        pretrained_path = os.path.join(CHECKPOINT_DIR, "pretrained.pt")
+        if os.path.exists(pretrained_path):
+            print("[pretrain] 发现已有 pretrained.pt，跳过生成，直接加载。")
+            if self.load_checkpoint("pretrained"):
+                self.iteration = 0
+            return
+
+        print(f"[pretrain] 开始生成 {PRETRAIN_GAMES} 局 deepseek 示范对局...")
+        samples = generate_deepseek_demos(PRETRAIN_GAMES)
+        print(f"[pretrain] 共 {len(samples)} 个示范样本，填入 replay buffer...")
+        for s in samples:
+            self.replay_buffer.push(*s)
+
+        print(f"[pretrain] 开始预训练 {PRETRAIN_TRAIN_STEPS} 步...")
+        for step in range(PRETRAIN_TRAIN_STEPS):
+            metrics = self.train_step()
+            if metrics and (step + 1) % 100 == 0:
+                print(f"  [pretrain] step {step + 1}/{PRETRAIN_TRAIN_STEPS}: "
+                      f"loss={metrics['loss']:.4f} "
+                      f"policy={metrics['policy_loss']:.4f} "
+                      f"value={metrics['value_loss']:.4f}")
+
+        self.save_checkpoint("pretrained")
+        print("[pretrain] 预训练完成，已保存 pretrained.pt。")
+        self.iteration = 0
+
     def run(self):
         int_iter = self._checkpoint_iteration(INTERRUPT_CHECKPOINT)
         lat_iter = self._checkpoint_iteration("latest")
@@ -573,6 +713,9 @@ class Trainer:
             print(f"[resume] latest({lat_iter}) > interrupt({int_iter})，加载 latest")
             self.load_checkpoint("latest")
         self.net.eval()
+
+        if self.iteration == 0 and PRETRAIN_GAMES > 0:
+            self.pretrain()
 
         signal.signal(signal.SIGINT, self._handle_interrupt)
         signal.signal(signal.SIGTERM, self._handle_interrupt)

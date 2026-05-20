@@ -72,8 +72,13 @@ SAVE_EVERY_ITERS = 20  # 每多少迭代保存 iter_* 与 latest
 EVAL_EVERY_ITERS = 50  # 每多少迭代对 random 评估一次；0 可关闭
 MAX_ITERATIONS = 100000  # 外层 while 上限；Ctrl+C 会先存 interrupt 再退出
 TRAIN_MCTS_SIMULATIONS = 20   # 初始模拟数；达到 MCTS_SIM_BOOST_ITER 后自动升到 MCTS_SIM_FULL
-MCTS_SIM_FULL      = 50   # 提升后的模拟数
-MCTS_SIM_BOOST_ITER = 150  # 迭代数达到此值后自动切换（与 DEEPSEEK_START_ITER 对齐）
+MCTS_SIM_FULL      = 100  # 提升后的模拟数
+MCTS_SIM_BOOST_ITER = 100  # 迭代数达到此值后自动切换
+# 训练走棋时前 N 步用温度采样（从 visit 分布按概率选），增加对局多样性；之后用 argmax。
+TEMPERATURE_STEPS = 20
+# 模仿学习（Imitation Learning）：用 deepseek 示范数据预训练 policy，打破冷启动困境。
+PRETRAIN_GAMES = 300        # 生成多少局 deepseek 示范对局
+PRETRAIN_TRAIN_STEPS = 500  # 在示范数据上跑多少步梯度更新
 
 # =============================================================================
 # 训练对手课程（Curriculum）
