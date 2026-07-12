@@ -1,5 +1,47 @@
-Predicting_Irrigation_Need/data/*.csv
-Predicting_Irrigation_Need/output/submissions/*.csv
+# ── 比赛数据集（体积大，不提交到 git）──────────────────────────────
+# 按比赛目录忽略 data/ 内容，保留 .gitkeep 占位
+ROGII/data/*
+!ROGII/data/.gitkeep
+Biohub/data/*
+!Biohub/data/.gitkeep
+
+# Predicting_Irrigation_Need：只保留占位文件
+Predicting_Irrigation_Need/data/*
+!Predicting_Irrigation_Need/data/.gitkeep
+
+# 通用规则：适用于未来新增的比赛
+**/data/train/
+**/data/test/
+**/data/**/*.csv
+**/data/**/*.parquet
+**/data/**/*.pkl
+**/data/**/*.npy
+**/data/**/*.h5
+**/data/**/*.pptx
+**/data/**/*.zip
+**/data/**/*.tar.gz
+
+# Orbit_War/data/ 里是文档和脚本，不是数据集，保持跟踪
+!Orbit_War/data/**
+
+# ── 比赛输出（模型、提交文件、中间结果，不提交）────────────────────
+*/output/*
+!*/output/.gitkeep
+*/outputs/*
+!*/outputs/.gitkeep
+
+# 通用：常见输出子目录和格式
+**/output/**/models/
+**/output/**/*.pt
+**/output/**/*.pth
+**/output/**/*.onnx
+**/output/**/*.pkl
+**/output/**/*.joblib
+**/output/**/*.csv
+**/outputs/**/models/
+**/outputs/**/*.csv
+
+# ── 其他 ──────────────────────────────────────────────────────────
 catboost_info/
 __pycache__/
 .claude
